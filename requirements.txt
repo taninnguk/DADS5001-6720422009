@@ -1,0 +1,7 @@
+streamlit
+pandas
+numpy
+plotly
+snowflake-snowpark-python>=0.9.0
+snowflake-connector-python>=2.8.0
+pymongo
