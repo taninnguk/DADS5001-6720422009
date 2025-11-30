@@ -32,8 +32,11 @@ def get_data():
 
 
 def trigger_rerun():
-    rerun = getattr(st, "rerun", st.experimental_rerun)
-    rerun()
+    # Prefer the stable rerun API, but fall back to the old experimental name if needed.
+    rerun_fn = getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None)
+    if rerun_fn is None:
+        raise RuntimeError("Streamlit rerun function is unavailable in this version.")
+    rerun_fn()
 
 
 @st.cache_data(show_spinner=False)

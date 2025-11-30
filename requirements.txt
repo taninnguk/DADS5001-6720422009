@@ -7,3 +7,4 @@ snowflake-connector-python>=2.8.0
 pymongo
 st-gsheets-connection
 openpyxl
+pypdf

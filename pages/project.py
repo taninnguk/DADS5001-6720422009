@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -85,28 +87,61 @@ def clean_invoice(df: pd.DataFrame) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=300)
-def load_sheet_data() -> tuple[pd.DataFrame, pd.DataFrame]:
-    conn = st.connection("gsheets", type=GSheetsConnection)
-    project_raw = conn.read(worksheet="Project", ttl="5m")
-    invoice_raw = conn.read(worksheet="Invoice", ttl="5m")
-    if project_raw is None or project_raw.empty:
-        raise ValueError("Google Sheets returned no rows for 'Project'.")
-    if invoice_raw is None:
-        invoice_raw = pd.DataFrame()
-    return clean_project(project_raw), clean_invoice(invoice_raw)
+def load_sheet_data() -> tuple[pd.DataFrame, pd.DataFrame, str]:
+    """Load data from Google Sheets, falling back to the local Excel file if needed."""
+    gsheets_error = None
+
+    try:
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        project_raw = conn.read(worksheet="Project", ttl="5m")
+        invoice_raw = conn.read(worksheet="Invoice", ttl="5m")
+        if project_raw is None or project_raw.empty:
+            raise ValueError("Google Sheets returned no rows for 'Project'.")
+        if invoice_raw is None:
+            invoice_raw = pd.DataFrame()
+        return clean_project(project_raw), clean_invoice(invoice_raw), "gsheets"
+    except Exception as exc:  # noqa: BLE001
+        gsheets_error = exc
+
+    fallback_path = Path(__file__).resolve().parent.parent / "BI Project status_Prototype-2.xlsx"
+    absolute_path = Path("/Users/sashimild/Desktop/Nguk/NIDA MASTER DEGREE/5001/DADS5001-6720422009/BI Project status_Prototype-2.xlsx")
+    if not fallback_path.exists() and absolute_path.exists():
+        fallback_path = absolute_path
+    if not fallback_path.exists():
+        raise RuntimeError("Unable to load from Google Sheets and fallback Excel file is missing.") from gsheets_error
+
+    try:
+        workbook = pd.ExcelFile(fallback_path)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Unable to read fallback Excel file: {fallback_path}") from exc
+
+    project_sheet = "Project" if "Project" in workbook.sheet_names else workbook.sheet_names[0]
+    invoice_sheet = "Invoice" if "Invoice" in workbook.sheet_names else None
+
+    project_raw = workbook.parse(project_sheet)
+    invoice_raw = workbook.parse(invoice_sheet) if invoice_sheet else pd.DataFrame()
+
+    return clean_project(project_raw), clean_invoice(invoice_raw), "excel"
 
 
 try:
-    project_df, invoice_df = load_sheet_data()
-    connection_ok = True
-except Exception as exc:
-    connection_ok = False
+    project_df, invoice_df, data_source = load_sheet_data()
+except Exception as exc:  # noqa: BLE001
+    data_source = "error"
     st.title("Project Management Dashboard")
-    st.error("Not connected to Google Sheets. Please verify access and the 'Project'/'Invoice' tabs.", icon="🚫")
+    st.error(
+        f"Data could not be loaded from Google Sheets or fallback Excel.\n\n{exc}",
+        icon="🚫",
+    )
     st.stop()
 
 st.title("Project Management Dashboard")
-st.caption("✅ Connected to Google Sheets" if connection_ok else "🚫 Not connected")
+if data_source == "gsheets":
+    st.caption("✅ Connected to Google Sheets")
+elif data_source == "excel":
+    st.caption("📄 Loaded from fallback Excel (Google Sheets unavailable)")
+else:
+    st.caption("🚫 Data not loaded")
 
 with st.sidebar:
     st.header("Filters")
@@ -154,6 +189,7 @@ total_value = filtered["Project Value"].sum()
 balance_sum = filtered["Balance"].sum()
 avg_progress_pct = filtered["Progress"].mean()
 avg_progress_pct = 0 if pd.isna(avg_progress_pct) else avg_progress_pct * 100
+order_count = filtered["Order number"].nunique()
 
 product_counts = {}
 for product_name in ["Control Panel", "Heater", "Vessel"]:
@@ -164,25 +200,19 @@ for product_name in ["Control Panel", "Heater", "Vessel"]:
 
 status_totals = filtered["Status"].value_counts()
 
-metric_col1, metric_col2, metric_col3, metric_col4 = st.columns([1, 1, 1.2, 1])
-metric_col1.metric("Sum of Project Value", fmt_m(total_value))
-metric_col2.metric("Sum of Balance", fmt_m(balance_sum))
-with metric_col3:
-    st.markdown("**Product units**")
-    p1, p2, p3 = st.columns(3)
-    p1.metric("Control Panel", int(product_counts.get("Control Panel", 0)))
-    p2.metric("Heater", int(product_counts.get("Heater", 0)))
-    p3.metric("Vessel", int(product_counts.get("Vessel", 0)))
-with metric_col4:
-    st.markdown("**Status counts**")
-    st.metric("Delayed", int(status_totals.get("Delayed", 0)))
-    st.metric("On track", int(status_totals.get("On track", 0)))
-    st.metric("Shipped", int(status_totals.get("Shipped", 0)))
+st.markdown("### Portfolio overview")
+metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+metric_col1.metric("Project value", fmt_m(total_value))
+metric_col2.metric("Balance", fmt_m(balance_sum))
+metric_col3.metric("Avg. progress", f"{avg_progress_pct:,.0f}%")
+metric_col4.metric("Orders", int(order_count))
 
-chart_col_left, chart_col_right = st.columns([1.4, 1])
+# Value and delivery at a glance.
+st.markdown("### Value and delivery")
+chart_col_left, chart_col_right = st.columns([1.35, 0.65])
 
 with chart_col_left:
-    st.subheader("Sum of Project Value and Balance by order number")
+    st.caption("Project value vs balance by order")
     order_summary = (
         filtered.groupby("Order number", dropna=True)[["Project Value", "Balance"]]
         .sum()
@@ -204,13 +234,13 @@ with chart_col_left:
             barmode="group",
             labels={"Amount": "Amount", "Order number": "Order number"},
         )
-        order_fig.update_layout(showlegend=True)
+        order_fig.update_layout(showlegend=True, margin=dict(l=10, r=10, t=30, b=10))
         st.plotly_chart(order_fig, use_container_width=True)
     else:
         st.info("No order number data to display.")
 
 with chart_col_right:
-    st.subheader("Average of Progress")
+    st.caption("Average progress")
     gauge = go.Figure(
         go.Indicator(
             mode="gauge+number",
@@ -229,70 +259,101 @@ with chart_col_right:
     )
     st.plotly_chart(gauge, use_container_width=True)
 
-    pie_col1, pie_col2 = st.columns(2)
-    with pie_col1:
-        engineer_value = (
-            filtered.groupby("Project Engineer", as_index=False)["Project Value"]
-            .sum()
-            .sort_values("Project Value", ascending=False)
-        )
-        st.caption("Sum of Project Value by Project Engineer")
-        if not engineer_value.empty:
-            eng_fig = px.pie(
-                engineer_value,
-                names="Project Engineer",
-                values="Project Value",
-                hole=0.4,
-            )
-            st.plotly_chart(eng_fig, use_container_width=True)
-        else:
-            st.info("No engineer data.")
-    with pie_col2:
-        customer_value = (
-            filtered.groupby("Customer", as_index=False)["Project Value"]
-            .sum()
-            .sort_values("Project Value", ascending=False)
-        )
-        st.caption("Sum of Project Value by Customer")
-        if not customer_value.empty:
-            cust_fig = px.pie(
-                customer_value,
-                names="Customer",
-                values="Project Value",
-                hole=0.4,
-            )
-            st.plotly_chart(cust_fig, use_container_width=True)
-        else:
-            st.info("No customer data.")
+    st.caption("Status + units")
+    status_cols = st.columns(2)
+    status_cols[0].metric("Delayed", int(status_totals.get("Delayed", 0)))
+    status_cols[0].metric("On track", int(status_totals.get("On track", 0)))
+    status_cols[1].metric("Shipped", int(status_totals.get("Shipped", 0)))
+    product_cols = st.columns(3)
+    product_cols[0].metric("Control Panel", int(product_counts.get("Control Panel", 0)))
+    product_cols[1].metric("Heater", int(product_counts.get("Heater", 0)))
+    product_cols[2].metric("Vessel", int(product_counts.get("Vessel", 0)))
 
-table_col_left, table_col_right = st.columns([1.2, 1])
+# Mix by engineer and customer.
+st.markdown("### Portfolio mix")
+pie_col1, pie_col2 = st.columns(2)
+with pie_col1:
+    engineer_value = (
+        filtered.groupby("Project Engineer", as_index=False)["Project Value"]
+        .sum()
+        .sort_values("Project Value", ascending=False)
+    )
+    st.caption("Project value by engineer")
+    if not engineer_value.empty:
+        eng_fig = px.pie(
+            engineer_value,
+            names="Project Engineer",
+            values="Project Value",
+            hole=0.4,
+        )
+        st.plotly_chart(eng_fig, use_container_width=True)
+    else:
+        st.info("No engineer data.")
+with pie_col2:
+    customer_value = (
+        filtered.groupby("Customer", as_index=False)["Project Value"]
+        .sum()
+        .sort_values("Project Value", ascending=False)
+    )
+    st.caption("Project value by customer")
+    if not customer_value.empty:
+        cust_fig = px.pie(
+            customer_value,
+            names="Customer",
+            values="Project Value",
+            hole=0.4,
+        )
+        st.plotly_chart(cust_fig, use_container_width=True)
+    else:
+        st.info("No customer data.")
+
+# Operations snapshots.
+st.markdown("### Operations")
+table_col_left, table_col_right = st.columns([1.25, 1])
 
 with table_col_left:
-    st.subheader("Manufactured by / Product (sum of Qty)")
+    st.caption("Manufactured by / Product (sum of Qty)")
     qty_by_manu = (
         filtered.groupby(["Manufactured by", "Product"], as_index=False)["Qty"]
         .sum()
         .sort_values("Qty", ascending=False)
     )
-    st.dataframe(qty_by_manu, use_container_width=True, height=320)
+    if not qty_by_manu.empty:
+        manu_fig = px.bar(
+            qty_by_manu,
+            x="Qty",
+            y="Manufactured by",
+            color="Product",
+            orientation="h",
+            labels={"Qty": "Units", "Manufactured by": "Manufacturer"},
+        )
+        manu_fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), height=360)
+        st.plotly_chart(manu_fig, use_container_width=True)
+    else:
+        st.info("No manufacturing data.")
 
 with table_col_right:
-    st.subheader("Status and orders")
+    st.caption("Status and phrases")
     total_status_rows = len(filtered)
-    order_count = filtered["Order number"].nunique()
     metric_a, metric_b = st.columns(2)
-    metric_a.metric("Status", total_status_rows)
-    metric_b.metric("Amount of order", order_count)
+    metric_a.metric("Status rows", total_status_rows)
+    metric_b.metric("Orders", order_count)
 
-    st.subheader("Project phrases")
-    phrase_counts = filtered["Project Phrase"].value_counts()
-    st.dataframe(
-        phrase_counts.rename_axis("Project Phrase").reset_index(name="Count"),
-        use_container_width=True,
-        height=240,
-    )
+    phrase_counts = filtered["Project Phrase"].value_counts().rename_axis("Project Phrase").reset_index(name="Count")
+    if not phrase_counts.empty:
+        phrase_fig = px.bar(
+            phrase_counts.sort_values("Count"),
+            x="Count",
+            y="Project Phrase",
+            orientation="h",
+            labels={"Count": "Projects"},
+        )
+        phrase_fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), height=360)
+        st.plotly_chart(phrase_fig, use_container_width=True)
+    else:
+        st.info("No phrase data.")
 
-st.subheader("Project details")
+st.markdown("### Project details")
 display_cols = [
     "Project",
     "Customer",
@@ -310,4 +371,3 @@ display_cols = [
 ]
 existing_cols = [c for c in display_cols if c in filtered.columns]
 st.dataframe(filtered[existing_cols].sort_values("Project"), use_container_width=True)
-
