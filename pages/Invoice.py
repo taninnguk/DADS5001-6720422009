@@ -109,7 +109,7 @@ def combine_columns(df: pd.DataFrame, primary: str, secondary: str) -> pd.Series
     return primary_series.combine_first(secondary_series)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, show_spinner=False)
 def load_data() -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """
     Load data with these rules:
@@ -181,6 +181,13 @@ st.caption(
     f"Project source: {'✅ Google Sheets' if sources.get('project') == 'gsheets' else '📄 Excel'}\n"
     f"Invoice source: 📄 Excel ({Path(sources.get('excel_path', '')).name})"
 )
+nav_cols = st.columns(3)
+with nav_cols[0]:
+    st.page_link("pages/project.py", label="↩️ Go to Project dashboard", icon="📊")
+with nav_cols[1]:
+    st.page_link("pages/Invoice.py", label="🔄 Stay on Invoice dashboard", icon="🧾")
+with nav_cols[2]:
+    st.page_link("pages/Add_Record.py", label="➕ Add record", icon="➕")
 
 # Sync invoice rows with project metadata for richer visuals.
 invoice_df["Order number"] = invoice_df.get("Sale order No.", pd.Series(dtype=object)).apply(normalize_order_number)
@@ -200,6 +207,10 @@ with st.sidebar:
         "Project engineer",
         sorted([e for e in merged["Project Engineer Combined"].dropna().unique()]),
     )
+    project_filter = st.multiselect(
+        "Project",
+        sorted([p for p in merged["Project Combined"].dropna().unique()]),
+    )
     year_filter = st.multiselect(
         "Project year",
         sorted([int(y) for y in merged["Project year"].dropna().unique() if pd.notna(y)]),
@@ -216,6 +227,8 @@ with st.sidebar:
 filtered = merged.copy()
 if engineer_filter:
     filtered = filtered[filtered["Project Engineer Combined"].isin(engineer_filter)]
+if project_filter:
+    filtered = filtered[filtered["Project Combined"].isin(project_filter)]
 if year_filter:
     filtered = filtered[filtered["Project year"].isin(year_filter)]
 if customer_filter:
@@ -255,8 +268,11 @@ with chart_col_left:
             x="Customer",
             y="Invoice value",
             labels={"Invoice value": "Invoice value"},
+            color="Invoice value",
+            color_continuous_scale="Blues",
         )
         cust_fig.update_layout(xaxis_tickangle=-30)
+        cust_fig.update_traces(hovertemplate="<b>%{x}</b><br>Invoice: %{y:,.0f}")
         st.plotly_chart(cust_fig, use_container_width=True)
     else:
         st.info("No customer data to display.")
@@ -271,6 +287,7 @@ with chart_col_right:
             values="Count",
             hole=0.4,
         )
+        pay_fig.update_traces(hovertemplate="<b>%{label}</b><br>Count: %{value}")
         st.plotly_chart(pay_fig, use_container_width=True)
     else:
         st.info("No payment status data.")
@@ -292,7 +309,10 @@ with dist_left:
             y="Project Engineer",
             orientation="h",
             labels={"Invoice value": "Invoice value", "Project Engineer": "Engineer"},
+            color="Invoice value",
+            color_continuous_scale="Blues",
         )
+        eng_fig.update_traces(hovertemplate="<b>%{y}</b><br>Invoice: %{x:,.0f}")
         eng_fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), height=420)
         st.plotly_chart(eng_fig, use_container_width=True)
     else:
@@ -313,7 +333,9 @@ with dist_right:
             color="Payment Status",
             barmode="stack",
             labels={"Invoice value": "Invoice value", "Project year": "Year"},
+            color_discrete_sequence=px.colors.qualitative.Set2,
         )
+        year_fig.update_traces(hovertemplate="<b>Year %{x}</b><br>%{legendgroup}: %{y:,.0f}")
         year_fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), height=420)
         st.plotly_chart(year_fig, use_container_width=True)
     else:
@@ -336,13 +358,71 @@ monthly_actual = (
     .reset_index()
     .rename(columns={"Invoice value": "Actual"})
 )
+monthly_actual_status = (
+    filtered.dropna(subset=["Actual Payment received date"])
+    .assign(month=lambda df: df["Actual Payment received date"].dt.to_period("M").dt.to_timestamp())
+    .groupby(["month", "Payment Status"])["Invoice value"]
+    .sum()
+    .reset_index()
+)
 monthly = pd.merge(monthly_plan, monthly_actual, on="month", how="outer").fillna(0).sort_values("month")
 if not monthly.empty:
-    monthly_fig = px.line(
-        monthly,
-        x="month",
-        y=["Planned", "Actual"],
-        labels={"value": "Invoice value", "month": "Month", "variable": "Series"},
+    monthly["month_str"] = monthly["month"].dt.strftime("%Y-%m")
+    monthly_actual_status["month_str"] = monthly_actual_status["month"].dt.strftime("%Y-%m")
+
+    palette = {
+        "Paid": px.colors.qualitative.Set2[1],
+        "Invoiced": px.colors.qualitative.Set2[2] if len(px.colors.qualitative.Set2) > 2 else "#a78bfa",
+        "Planned": px.colors.qualitative.Set2[3] if len(px.colors.qualitative.Set2) > 3 else "#22c55e",
+        "Overdue": "#ef4444",
+        "": "#94a3b8",
+    }
+
+    # Actual as stacked bars by Payment Status
+    bar_fig = px.bar(
+        monthly_actual_status,
+        x="month_str",
+        y="Invoice value",
+        color="Payment Status",
+        labels={"Invoice value": "Invoice value", "month_str": "Month", "Payment Status": "Status"},
+        color_discrete_map=palette,
+    )
+    for trace in bar_fig.data:
+        trace.update(
+            hovertemplate="<b>%{x}</b><br>Status: %{legendgroup}<br>Actual: %{y:,.0f}",
+            marker_line_width=0.6,
+        )
+
+    # Planned as line
+    planned_df = monthly[["month_str", "Planned"]]
+    line_trace = px.line(
+        planned_df,
+        x="month_str",
+        y="Planned",
+        labels={"Planned": "Invoice value", "month_str": "Month"},
+        color_discrete_sequence=[px.colors.qualitative.Set2[0]],
+    ).data[0]
+    line_trace.update(
+        name="Planned",
+        legendgroup="Planned",
+        hovertemplate="<b>%{x}</b><br>Planned: %{y:,.0f}",
+        line=dict(width=2.4),
+        marker=dict(size=7, symbol="circle"),
+    )
+
+    # Combine traces
+    monthly_fig = px.line()  # empty fig
+    for trace in bar_fig.data:
+        monthly_fig.add_trace(trace)
+    monthly_fig.add_trace(line_trace)
+
+    monthly_fig.update_layout(
+        legend=dict(title=None),
+        height=420,
+        margin=dict(l=10, r=10, t=30, b=10),
+        xaxis=dict(tickangle=-45, tickfont=dict(size=12), categoryorder="category ascending", title="Month"),
+        yaxis=dict(tickfont=dict(size=12), title="Invoice value"),
+        bargap=0.15,
     )
     st.plotly_chart(monthly_fig, use_container_width=True)
 else:

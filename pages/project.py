@@ -14,6 +14,21 @@ def fmt_m(value: float) -> str:
         return "0"
     return f"{value/1_000_000:,.2f} M"
 
+def metric_card(label: str, value: str, fg: str = "#0f172a", bg: str = "#f5f7fb") -> str:
+    """Return HTML for a simple metric card."""
+    return f"""
+    <div style="
+        padding: 12px 14px;
+        border-radius: 10px;
+        background: {bg};
+        border: 1px solid #e0e4ef;
+        margin: 6px 0;
+    ">
+        <div style="font-size: 12px; color: #475569; margin-bottom: 4px;">{label}</div>
+        <div style="font-size: 22px; font-weight: 700; color: {fg}; line-height: 1.2;">{value}</div>
+    </div>
+    """
+
 
 def clean_project(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -86,7 +101,7 @@ def clean_invoice(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, show_spinner=False)
 def load_sheet_data() -> tuple[pd.DataFrame, pd.DataFrame, str]:
     """Load data from Google Sheets, falling back to the local Excel file if needed."""
     gsheets_error = None
@@ -143,12 +158,25 @@ elif data_source == "excel":
 else:
     st.caption("🚫 Data not loaded")
 
+nav_cols = st.columns(3)
+with nav_cols[0]:
+    st.page_link("pages/Invoice.py", label="↩️ Go to Invoice dashboard", icon="🧾")
+with nav_cols[1]:
+    st.page_link("pages/project.py", label="🔄 Stay on Project dashboard", icon="📊")
+with nav_cols[2]:
+    st.page_link("pages/Add_Record.py", label="➕ Add record", icon="➕")
+
 with st.sidebar:
     st.header("Filters")
     engineer_filter = st.multiselect(
         "Project engineer",
         sorted(project_df["Project Engineer"].dropna().unique()),
         default=sorted(project_df["Project Engineer"].dropna().unique()),
+    )
+    project_filter = st.multiselect(
+        "Project",
+        sorted(project_df["Project"].dropna().unique()),
+        default=sorted(project_df["Project"].dropna().unique()),
     )
     year_filter = st.multiselect(
         "Project year",
@@ -172,6 +200,8 @@ with st.sidebar:
 filtered = project_df.copy()
 if engineer_filter:
     filtered = filtered[filtered["Project Engineer"].isin(engineer_filter)]
+if project_filter:
+    filtered = filtered[filtered["Project"].isin(project_filter)]
 if year_filter:
     filtered = filtered[filtered["Project year"].isin(year_filter)]
 if status_filter:
@@ -200,47 +230,81 @@ for product_name in ["Control Panel", "Heater", "Vessel"]:
 
 status_totals = filtered["Status"].value_counts()
 
-st.markdown("### Portfolio overview")
-metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
-metric_col1.metric("Project value", fmt_m(total_value))
-metric_col2.metric("Balance", fmt_m(balance_sum))
-metric_col3.metric("Avg. progress", f"{avg_progress_pct:,.0f}%")
-metric_col4.metric("Orders", int(order_count))
+st.markdown("## Portfolio overview")
+st.caption("สรุปมูลค่า คงเหลือ ความคืบหน้า และจำนวนออเดอร์ พร้อมยอดหน่วยสินค้าและสถานะในมุมมองเดียว")
+summary_top = st.columns(4)
+summary_top[0].markdown(metric_card("Sum of Project Value", fmt_m(total_value), fg="#2563eb"), unsafe_allow_html=True)
+summary_top[1].markdown(metric_card("Sum of Balance", fmt_m(balance_sum), fg="#dc2626"), unsafe_allow_html=True)
+summary_top[2].markdown(metric_card("Avg. Progress", f"{avg_progress_pct:,.0f}%", fg="#0ea5e9"), unsafe_allow_html=True)
+summary_top[3].markdown(metric_card("Orders", int(order_count), fg="#0f172a"), unsafe_allow_html=True)
 
-# Value and delivery at a glance.
-st.markdown("### Value and delivery")
-chart_col_left, chart_col_right = st.columns([1.35, 0.65])
+summary_bottom = st.columns(6)
+summary_bottom[0].markdown(metric_card("Control Panel", int(product_counts.get("Control Panel", 0)), fg="#0f172a"), unsafe_allow_html=True)
+summary_bottom[1].markdown(metric_card("Heater", int(product_counts.get("Heater", 0)), fg="#0f172a"), unsafe_allow_html=True)
+summary_bottom[2].markdown(metric_card("Vessel", int(product_counts.get("Vessel", 0)), fg="#0f172a"), unsafe_allow_html=True)
+summary_bottom[3].markdown(metric_card("Delayed", int(status_totals.get("Delayed", 0)), fg="#dc2626", bg="#fff2f2"), unsafe_allow_html=True)
+summary_bottom[4].markdown(metric_card("On track", int(status_totals.get("On track", 0)), fg="#15803d", bg="#ecfdf3"), unsafe_allow_html=True)
+summary_bottom[5].markdown(metric_card("Shipped", int(status_totals.get("Shipped", 0)), fg="#0ea5e9", bg="#f0f9ff"), unsafe_allow_html=True)
 
-with chart_col_left:
-    st.caption("Project value vs balance by order")
+st.divider()
+
+st.markdown("## Delivery & progress")
+st.caption("ภาพรวมยอดมูลค่า/คงเหลือต่อออเดอร์ และเกจความคืบหน้าที่สรุปเฉลี่ยทุกโครงการ")
+val_col_left, val_col_right = st.columns([1.1, 0.9])
+
+with val_col_left:
+    st.caption("Top 20 orders by value (stacked with balance)")
     order_summary = (
-        filtered.groupby("Order number", dropna=True)[["Project Value", "Balance"]]
-        .sum()
+        filtered.groupby("Order number", dropna=True)
+        .agg(
+            {
+                "Project Value": "sum",
+                "Balance": "sum",
+                "Project": lambda x: x.dropna().iloc[0] if not x.dropna().empty else "",
+            }
+        )
         .reset_index()
         .sort_values("Project Value", ascending=False)
+        .head(20)
     )
     if not order_summary.empty:
+        order_summary["Order display"] = order_summary["Order number"].astype("string").fillna("").str.strip()
         long_orders = order_summary.melt(
-            id_vars="Order number",
+            id_vars=["Order number", "Order display"],
             value_vars=["Project Value", "Balance"],
             var_name="Metric",
             value_name="Amount",
         )
         order_fig = px.bar(
             long_orders,
-            x="Order number",
-            y="Amount",
+            x="Amount",
+            y="Order display",
             color="Metric",
-            barmode="group",
-            labels={"Amount": "Amount", "Order number": "Order number"},
+            orientation="h",
+            labels={"Amount": "Amount", "Order display": "Order number"},
+            color_discrete_sequence=px.colors.qualitative.Set1,
         )
-        order_fig.update_layout(showlegend=True, margin=dict(l=10, r=10, t=30, b=10))
+        order_fig.update_traces(hovertemplate="<b>Order %{y}</b><br>%{fullData.name}: %{x:,.0f}", marker_line_width=0.6)
+        order_fig.update_layout(
+            showlegend=True,
+            margin=dict(l=10, r=10, t=30, b=10),
+            height=480,
+            yaxis=dict(
+                title="Order number",
+                tickfont=dict(size=13),
+                type="category",
+                categoryorder="array",
+                categoryarray=order_summary["Order display"].tolist()[::-1],
+            ),
+            xaxis=dict(title="Amount", tickfont=dict(size=12)),
+            bargap=0.2,
+        )
         st.plotly_chart(order_fig, use_container_width=True)
     else:
         st.info("No order number data to display.")
 
-with chart_col_right:
-    st.caption("Average progress")
+with val_col_right:
+    st.caption("Average progress (ทุกโครงการที่กรอง)")
     gauge = go.Figure(
         go.Indicator(
             mode="gauge+number",
@@ -257,20 +321,18 @@ with chart_col_right:
             },
         )
     )
-    st.plotly_chart(gauge, use_container_width=True)
+    gauge.update_layout(height=320, margin=dict(l=10, r=10, t=20, b=20))
+    st.plotly_chart(gauge, use_container_width=True, config={"displayModeBar": False})
+    st.caption("ค่าความคืบหน้าเฉลี่ยหลังกรองข้อมูล ใช้ดูภาพรวมการส่งมอบ")
+    status_cols = st.columns(3)
+    status_cols[0].markdown(metric_card("Delayed", int(status_totals.get("Delayed", 0)), fg="#dc2626", bg="#fff2f2"), unsafe_allow_html=True)
+    status_cols[1].markdown(metric_card("On track", int(status_totals.get("On track", 0)), fg="#15803d", bg="#ecfdf3"), unsafe_allow_html=True)
+    status_cols[2].markdown(metric_card("Shipped", int(status_totals.get("Shipped", 0)), fg="#0ea5e9", bg="#f0f9ff"), unsafe_allow_html=True)
 
-    st.caption("Status + units")
-    status_cols = st.columns(2)
-    status_cols[0].metric("Delayed", int(status_totals.get("Delayed", 0)))
-    status_cols[0].metric("On track", int(status_totals.get("On track", 0)))
-    status_cols[1].metric("Shipped", int(status_totals.get("Shipped", 0)))
-    product_cols = st.columns(3)
-    product_cols[0].metric("Control Panel", int(product_counts.get("Control Panel", 0)))
-    product_cols[1].metric("Heater", int(product_counts.get("Heater", 0)))
-    product_cols[2].metric("Vessel", int(product_counts.get("Vessel", 0)))
+st.divider()
 
-# Mix by engineer and customer.
-st.markdown("### Portfolio mix")
+st.markdown("## Mix by owner/customer")
+st.caption("สัดส่วนมูลค่าโครงการแยกตามวิศวกรผู้ดูแลและลูกค้า")
 pie_col1, pie_col2 = st.columns(2)
 with pie_col1:
     engineer_value = (
@@ -278,14 +340,15 @@ with pie_col1:
         .sum()
         .sort_values("Project Value", ascending=False)
     )
-    st.caption("Project value by engineer")
     if not engineer_value.empty:
         eng_fig = px.pie(
             engineer_value,
             names="Project Engineer",
             values="Project Value",
-            hole=0.4,
+            hole=0.45,
+            color_discrete_sequence=px.colors.qualitative.Set2,
         )
+        eng_fig.update_traces(hovertemplate="<b>%{label}</b><br>Value: %{value:,.0f}<br>%{percent}")
         st.plotly_chart(eng_fig, use_container_width=True)
     else:
         st.info("No engineer data.")
@@ -295,20 +358,23 @@ with pie_col2:
         .sum()
         .sort_values("Project Value", ascending=False)
     )
-    st.caption("Project value by customer")
     if not customer_value.empty:
         cust_fig = px.pie(
             customer_value,
             names="Customer",
             values="Project Value",
-            hole=0.4,
+            hole=0.45,
+            color_discrete_sequence=px.colors.qualitative.Set3,
         )
+        cust_fig.update_traces(hovertemplate="<b>%{label}</b><br>Value: %{value:,.0f}<br>%{percent}")
         st.plotly_chart(cust_fig, use_container_width=True)
     else:
         st.info("No customer data.")
 
-# Operations snapshots.
-st.markdown("### Operations")
+st.divider()
+
+st.markdown("## Operations & status")
+st.caption("ซัพพลายเชน: จำนวนสินค้าแยกผู้ผลิต/สินค้า, พร้อมสถานะและคำสำคัญของโครงการ")
 table_col_left, table_col_right = st.columns([1.25, 1])
 
 with table_col_left:
@@ -326,34 +392,41 @@ with table_col_left:
             color="Product",
             orientation="h",
             labels={"Qty": "Units", "Manufactured by": "Manufacturer"},
+            color_discrete_sequence=px.colors.qualitative.Set2,
         )
+        manu_fig.update_traces(hovertemplate="<b>%{customdata[0]}</b><br>%{y}<br>Qty: %{x:,.0f}")
+        manu_fig.update_traces(customdata=qty_by_manu[["Product"]])
         manu_fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), height=360)
         st.plotly_chart(manu_fig, use_container_width=True)
     else:
         st.info("No manufacturing data.")
 
 with table_col_right:
-    st.caption("Status and phrases")
     total_status_rows = len(filtered)
     metric_a, metric_b = st.columns(2)
     metric_a.metric("Status rows", total_status_rows)
     metric_b.metric("Orders", order_count)
 
     phrase_counts = filtered["Project Phrase"].value_counts().rename_axis("Project Phrase").reset_index(name="Count")
+    st.caption("Project phrases (top keywords)")
     if not phrase_counts.empty:
         phrase_fig = px.bar(
-            phrase_counts.sort_values("Count"),
+            phrase_counts.sort_values("Count").tail(15),
             x="Count",
             y="Project Phrase",
             orientation="h",
             labels={"Count": "Projects"},
+            color="Count",
+            color_continuous_scale="Greens",
         )
+        phrase_fig.update_traces(hovertemplate="<b>%{y}</b><br>Projects: %{x}")
         phrase_fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), height=360)
         st.plotly_chart(phrase_fig, use_container_width=True)
     else:
         st.info("No phrase data.")
 
-st.markdown("### Project details")
+st.markdown("## Project details")
+st.caption("ตารางโครงการแบบละเอียด ใช้กรองด้านซ้ายเพื่อลดรายการและโฟกัสเฉพาะที่สนใจ")
 display_cols = [
     "Project",
     "Customer",
